@@ -1,0 +1,192 @@
+---
+title: "StudySiteMap"
+output: html_document
+date: "2023-09-07"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading libraries.
+```{r}
+#### Libraries #### 
+library(raster)
+library(amt)
+library(dplyr)
+library(tibble)
+library(purrr)
+library(tidyr)
+library(lme4)
+library(lmerTest)
+library(janitor)
+library(rio)
+library(stringr)
+library(MuMIn)
+library(tidyverse)
+library(bayesplot)
+library(ggeffects)
+library(ggplot2)
+library(brms)
+library(writexl)
+library(sf)
+```
+
+Importing shapefile of study site, renaming and lumping layers, converting to raster layer, establishing template for raster stack.
+```{r}
+##### Importing map of study site as a shape file #### 
+
+habitat <- raster::shapefile("/Volumes/Samsung_T5/BOBWHITE_DATA/BobwhiteData/Simplified_LandCover/Simplified_LandCover.shp")
+
+
+
+#Renaming landcover types to model friendly terms. Lumping landcover types w similar understory vegetation.
+habitat$HABITAT <- gsub("AGRICULTURAL", "AG", habitat$HABITAT)
+habitat$HABITAT <- gsub("SHRUB/SCRUB", "SS", habitat$HABITAT)
+habitat$HABITAT <- gsub("URBAN/MOWED", "UM", habitat$HABITAT)
+habitat$HABITAT <- gsub("PINE/HARDWOOD", "NP", habitat$HABITAT) #This layer is >50% natural pine (by basal area)
+habitat$HABITAT <- gsub("PINE PLANTATION", "PP", habitat$HABITAT)
+habitat$HABITAT <- gsub("WETLAND", "WL", habitat$HABITAT)
+habitat$HABITAT <- gsub("HARDWOOD", "HW", habitat$HABITAT)
+habitat$HABITAT <- gsub("HW/PINE FOREST", "HW", habitat$HABITAT) #This layer is >50% HW (by basal area)
+habitat$HABITAT <- gsub("NATURAL PINE", "NP", habitat$HABITAT)
+habitat$HABITAT <- gsub("WILDLIFE FOOD PLOT", "AG", habitat$HABITAT)
+habitat$HABITAT <- gsub("NP/PINE FOREST", "NP", habitat$HABITAT)
+
+#Let's count the land cover types in habitat$HABITAT.
+habitat %>%
+  as.data.frame() %>%
+  count(HABITAT, sort = T) %>%
+  print()
+
+#Importing map of burn units
+burn_units_2022 <- raster::shapefile("/Volumes/Samsung_T5/BOBWHITE_DATA/BobwhiteData/2022_BurnUnits.shp 2/2022_BurnUnits.shp")
+
+#Lets look at the burn units attribute table
+burn_units_2022 %>%
+  as.data.frame() %>%
+  view()
+
+plot(burn_units_2022_cropped, col = as.factor(burn_units_2022_cropped$BURNDATE))
+
+#Let's plot these to make sure everything is lining up correctly
+plot(burn_units_2022_cropped, col = as.factor(burn_units_2022_cropped$BURNDATE))
+plot(habitat, add = TRUE)
+
+#Importing our summer 2022 locations, with nesting locations excluded. Just want to make sure we're all square.
+Summer_2022_locs <- rio::import("/Volumes/Samsung_T5/BOBWHITE_DATA/Clean/All_Summer_2022_LOCS_CLEAN_NO_Nests.xlsx", setclass = "tibble") %>%
+  clean_names() %>%
+  filter(status != "D") %>%
+  mutate(date = lubridate::as_date(date))
+
+# Overlay the Summer_2022_locs using points
+points(Summer_2022_locs$easting, Summer_2022_locs$northing, col = Summer_2022_locs$band_numb, pch = 20, cex = 0.5)
+
+#NOTE: Everything Looks ok
+```
+
+Attemtping to intersect burn units 2022 map and habitat shapefile.
+```{r}
+library(sp)
+
+# Crop burn_units_2022 to the extent of habitat
+burn_units_2022_cropped <- sp::spTransform(burn_units_2022, CRS(proj4string(habitat)))
+burn_units_2022_cropped <- rgeos::gIntersection(burn_units_2022_cropped, habitat, byid = TRUE)
+
+
+#Intersecting the two layers.
+intersection_result <- raster::intersect(habitat, burn_units_2022)
+
+# Create a new column to specify the burn status
+intersection_result$burn_status <- ifelse(is.na(intersection_result$BURNDATE), "Unburned", "Burned")
+
+# Specify that anything which is a wetland ("WL"), agricultural ("AG"), shrub/scrub ("SS"), or urban/mowed ("UM") is "Unburned"
+unburned_types <- c("WL", "AG", "SS", "UM")
+intersection_result$burn_status[intersection_result$HABITAT %in% unburned_types] <- "Unburned"
+
+# Create a new column to combine habitat and burn status
+intersection_result$LandCover_MGMT <- paste(intersection_result$HABITAT, intersection_result$burn_status, sep = "_")
+
+#Looking at dataframe of results.
+intersection_result %>%
+  as.data.frame() %>%
+  view()
+
+#Lets count LandCover_MGMT types
+intersection_result %>%
+  as.data.frame() %>%
+  count(LandCover_MGMT, sort = TRUE)
+
+#Lets plot it.
+plot(intersection_result, col = as.factor(intersection_result$LandCover_MGMT), add = TRUE)
+
+
+# Save the new shapefile
+raster::shapefile(intersection_result, "/Volumes/Samsung_T5/BOBWHITE_DATA/BobwhiteData/SimplifiedLCovBurnData.shp")
+```
+
+Some debugging
+```{r}
+print(bbox(habitat))
+print(bbox(burn_units_2022))
+
+
+# Check extents
+print(extent(habitat))
+print(extent(burn_units_2022))
+
+# Check geometries if they are in sf format
+# Note: This is more relevant if you have the shapefiles as sf objects
+# print(st_is_valid(habitat))
+# print(st_is_valid(burn_units_2022))
+
+# Check first few rows of intersection_result
+print(head(intersection_result))
+
+```
+
+Trying the same thing as above but with terra package
+```{r}
+# Load the terra package
+library(terra)
+
+# Read habitat shapefile
+habitat <- vect("/Volumes/Samsung_T5/BOBWHITE_DATA/BobwhiteData/Simplified_LandCover/Simplified_LandCover.shp")
+
+# Convert to data frame to rename and lump attributes
+habitat_df <- as.data.frame(habitat)
+habitat_df$HABITAT <- gsub("AGRICULTURAL", "AG", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("SHRUB/SCRUB", "SS", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("URBAN/MOWED", "UM", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("PINE/HARDWOOD", "NP", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("PINE PLANTATION", "PP", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("WETLAND", "WL", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("HARDWOOD", "HW", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("HW/PINE FOREST", "HW", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("NATURAL PINE", "NP", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("WILDLIFE FOOD PLOT", "AG", habitat_df$HABITAT)
+habitat_df$HABITAT <- gsub("NP/PINE FOREST", "NP", habitat_df$HABITAT)
+
+# Read burn_units_2022 shapefile
+burn_units_2022 <- vect("/Volumes/Samsung_T5/BOBWHITE_DATA/BobwhiteData/2022_BurnUnits.shp")
+
+# Intersect the two layers
+intersection_result <- terra::intersect(habitat, burn_units_2022)
+
+# Convert to data frame to add new columns
+df <- as.data.frame(intersection_result)
+df$burn_status <- ifelse(is.na(df$BURNDATE), "Unburned", "Burned")
+df$LandCover_MGMT <- paste(df$HABITAT, df$burn_status, sep = "_")
+
+# Merge the new attributes back to the original intersection_result
+intersection_result <- vect(df, geom=geom(intersection_result, "polygons"))
+
+# Plot the intersection_result by burn_status and LandCover_MGMT
+terra::plot(intersection_result, "burn_status")
+terra::plot(intersection_result, "LandCover_MGMT")
+
+```
+
+
